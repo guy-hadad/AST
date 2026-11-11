@@ -1,0 +1,10 @@
+# T5 encoder-decoder recommender (shared by every tokenizer in the paper)
+encoder_layers: 6
+decoder_layers: 6
+d_model: 128
+d_ff: 1024
+num_heads: 6
+feed_forward_proj: relu
+dropout_rate: 0.15
+initializer_factor: 0.02
+layer_norm_epsilon: 1e-6

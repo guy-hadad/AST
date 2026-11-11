@@ -1,0 +1,13 @@
+# @package _global_
+# Paper Table 1: Beauty / AST-V1 (source run: gwnzy5z9)
+defaults:
+  - override /tokenization: ast_v1
+
+data:
+  category: Beauty
+
+tokenization:
+  m: 4
+  min_share_prob: 0.04
+  use_item_mass: true
+  milp_time_limit: 100

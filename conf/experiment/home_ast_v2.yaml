@@ -1,0 +1,13 @@
+# @package _global_
+# Paper Table 1: Home_and_Kitchen / AST-V2 (source run: zade86nv)
+defaults:
+  - override /tokenization: ast_v2
+
+data:
+  category: Home_and_Kitchen
+
+tokenization:
+  m: 5
+  min_share_prob: 0.01
+  use_item_mass: true
+  milp_time_limit: 100

@@ -1,0 +1,8 @@
+# Amazon Reviews 2014, 5-core (SNAP). Files are downloaded to <root>/amazon on first use.
+category: Beauty                   # Beauty | Toys_and_Games | Sports_and_Outdoors | Health_and_Personal_Care | Home_and_Kitchen
+root: raw_data
+download_if_missing: true
+max_history: 20                    # keep the last 20 interactions of every history
+cols_to_use: [title, categories, description]      # item text = concatenation of these fields
+keep_columns: [asin, title, description, categories, price]
+remove_cols: [user_id, history, label]

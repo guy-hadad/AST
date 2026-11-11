@@ -1,0 +1,40 @@
+# AST-V2: mass-aware constrained refinement (paper Sec. 4.4.3)
+variant: AST-V2
+base: 4096                         # B: max branching factor / tokens per level
+m: 4                               # semantic ID length (m-1 tree levels + 1 suffix token)
+encoder_name: Qwen/Qwen3-Embedding-0.6B
+batch_size: 8                      # item-encoding batch size
+max_seq_length: 512
+start_token: 3                     # item ids start after <pad>, <eos>, <unk>
+cache_embeddings: true             # cache item embeddings under <data.root>/embeddings
+sids_path: null                    # path to a saved item2tokseq_ids.pkl to skip building SIDs
+
+# ---- adaptive branching: K chosen per node by silhouette ----
+max_iter_kmeans: 50
+n_init_kmeans: 10
+silhouette_metric: euclidean
+patience: 5                        # stop the K search after 5 non-improving candidates
+silhouette_sample_size: 2000       # silhouette on a subsample for large nodes (null = all items)
+k_search_step: 1                   # candidate K = K_min, K_min+1, ...
+capacity_aware_min_k: true         # K_min guarantees every leaf bucket fits in B suffix tokens
+stop_recursion_if_no_split: true
+
+# ---- minimum-mass constraint ----
+min_share_prob: 0.02               # rho: every child keeps >= rho of its parent's mass
+enforce_min_share_hard: true       # never accept a split that violates rho
+use_item_mass: true                # p_i = train interaction frequency (false = uniform mass)
+
+# ---- mass-aware MILP refinement ----
+MILP: true
+milp_only_if_needed: false         # solve the MILP for every candidate split
+milp_refine_rounds: 3              # alternate {exact MILP assignment, weighted center update}
+milp_use_weighted_centers: true    # mass-weighted KMeans init and center updates
+weighted_silhouette: true          # score splits with the mass-weighted silhouette
+milp_candidate_topk: 16            # each item may join one of its 16 nearest centers
+milp_time_limit: 100               # seconds per (node, K) solve
+milp_gap: 0.001
+milp_solver_name: CBC              # CBC (open source) | GRB (Gurobi, needs a license)
+milp_verbose: false
+
+print_each_clustering: true
+print_stats: true

@@ -1,0 +1,13 @@
+# @package _global_
+# Paper Table 1: Sports_and_Outdoors / AST-V2 (source run: 7e3nbi6p)
+defaults:
+  - override /tokenization: ast_v2
+
+data:
+  category: Sports_and_Outdoors
+
+tokenization:
+  m: 5
+  min_share_prob: 0.02
+  use_item_mass: false
+  milp_time_limit: 100

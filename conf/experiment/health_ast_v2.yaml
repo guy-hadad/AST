@@ -1,0 +1,13 @@
+# @package _global_
+# Paper Table 1: Health_and_Personal_Care / AST-V2 (source run: d1m3152b)
+defaults:
+  - override /tokenization: ast_v2
+
+data:
+  category: Health_and_Personal_Care
+
+tokenization:
+  m: 5
+  min_share_prob: 0.05
+  use_item_mass: false
+  milp_time_limit: 100

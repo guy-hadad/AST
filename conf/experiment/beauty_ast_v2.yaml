@@ -1,0 +1,13 @@
+# @package _global_
+# Paper Table 1: Beauty / AST-V2 (source run: hw4e1ukl)
+defaults:
+  - override /tokenization: ast_v2
+
+data:
+  category: Beauty
+
+tokenization:
+  m: 4
+  min_share_prob: 0.02
+  use_item_mass: true
+  milp_time_limit: 100

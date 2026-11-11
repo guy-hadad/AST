@@ -1,0 +1,28 @@
+cff-version: 1.2.0
+message: "If you use this code, please cite the paper below."
+title: "AST: Adaptive Silhouette Tree for semantic ID construction"
+authors:
+  - family-names: Hadad
+    given-names: Guy
+  - family-names: Roitman
+    given-names: Haggai
+  - family-names: Shapira
+    given-names: Bracha
+license: MIT
+preferred-citation:
+  type: conference-paper
+  title: "Not All Branches Are Equal: Adaptive Semantic ID Construction for Generative Recommendation"
+  authors:
+    - family-names: Hadad
+      given-names: Guy
+    - family-names: Roitman
+      given-names: Haggai
+    - family-names: Shapira
+      given-names: Bracha
+  collection-title: "Proceedings of the 20th ACM Conference on Recommender Systems (RecSys '26)"
+  publisher:
+    name: ACM
+  start: 390
+  end: 399
+  year: 2026
+  doi: 10.1145/3773078.3831756

@@ -1,0 +1,13 @@
+# @package _global_
+# Paper Table 1: Sports_and_Outdoors / AST-V1 (source run: cetj98mg)
+defaults:
+  - override /tokenization: ast_v1
+
+data:
+  category: Sports_and_Outdoors
+
+tokenization:
+  m: 4
+  min_share_prob: 0.001
+  use_item_mass: true
+  milp_time_limit: 100

@@ -1,0 +1,289 @@
+"""AST end-to-end: Amazon 2014 data -> AST semantic IDs -> T5 generative recommender -> Recall/NDCG.
+
+    python train.py experiment=beauty_ast_v2
+    python train.py data.category=Toys_and_Games tokenization=ast_v1 tokenization.m=4 tokenization.min_share_prob=0.04
+
+Optional stages (the full run needs none of them):
+    stop_after=embed                 only encode + cache item embeddings
+    stop_after=sids                  stop after writing item2tokseq_ids.pkl (CPU is enough when embeddings are cached)
+    tokenization.sids_path=<pkl>     train on previously built semantic IDs
+"""
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import pickle
+import time
+from pathlib import Path
+
+import hydra
+import numpy as np
+from hydra.core.hydra_config import HydraConfig
+from hydra.utils import get_original_cwd
+from omegaconf import DictConfig, OmegaConf
+from transformers import DataCollatorForSeq2Seq, EarlyStoppingCallback, Seq2SeqTrainingArguments
+
+from data import build_amazon2014_seq_splits, build_asin2text, load_amazon2014_meta, print_split_stats
+from evaluation import build_code_metrics
+from model import (
+    TrieConstrainedSeq2SeqTrainer,
+    build_item_code_trie,
+    build_t5_seq2seq,
+    make_prefix_allowed_tokens_fn,
+)
+from silhouette_tree import build_item2tokseq_ids_silhouette_tree, encode_items
+from utils import (
+    DEFAULT_IGN_ID,
+    EvalSaveEveryNEpochsCallback,
+    build_contiguous_wordlevel_tokenizer,
+    build_id2text_from_item2token,
+    compute_item_probs_from_dd_train,
+    make_seq2seq_tokenize_fn,
+    normalize_item2token,
+    print_model_parameters,
+    set_global_seed,
+    tokenize_splits,
+)
+
+
+def load_or_encode_items(cfg: DictConfig, id2text, data_root: Path) -> np.ndarray:
+    """Unit-norm item embeddings, cached under <data.root>/embeddings (keyed by encoder + item texts)."""
+    t = cfg.tokenization
+    key = hashlib.sha1(f"{t.encoder_name}|{t.max_seq_length}|".encode() + "\n".join(id2text).encode()).hexdigest()[:16]
+    path = data_root / "embeddings" / f"{cfg.data.category}_{str(t.encoder_name).replace('/', '_')}_{key}.npy"
+    if t.cache_embeddings and path.exists():
+        print(f"[embeddings] loaded {path}")
+        return np.load(path)
+    embs = encode_items(
+        id2text, encoder_name=str(t.encoder_name), batch_size=int(t.batch_size), max_seq_length=int(t.max_seq_length)
+    )
+    if t.cache_embeddings:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(f".tmp{os.getpid()}.npy")
+        np.save(tmp, embs)
+        os.replace(tmp, path)
+        print(f"[embeddings] saved {path}")
+    return embs
+
+
+def build_semantic_ids(cfg: DictConfig, id2text, tokenizer, item_probs, item_embs):
+    t = cfg.tokenization
+    return build_item2tokseq_ids_silhouette_tree(
+        id2text=id2text,
+        tokenizer=tokenizer,
+        base=int(t.base),
+        m=int(t.m),
+        seed=int(cfg.seed),
+        encoder_name=str(t.encoder_name),
+        batch_size=int(t.batch_size),
+        max_seq_length=int(t.max_seq_length),
+        item_embs=item_embs,
+        item_embs_normalized=True,
+        item_probs=item_probs if bool(t.use_item_mass) else None,
+        # KMeans / silhouette model selection
+        max_iter_kmeans=int(t.max_iter_kmeans),
+        n_init_kmeans=int(t.n_init_kmeans),
+        silhouette_metric=str(t.silhouette_metric),
+        patience=int(t.patience),
+        silhouette_sample_size=None if t.silhouette_sample_size is None else int(t.silhouette_sample_size),
+        k_search_step=int(t.k_search_step),
+        weighted_silhouette=bool(t.weighted_silhouette),
+        # tree
+        capacity_aware_min_k=bool(t.capacity_aware_min_k),
+        stop_recursion_if_no_split=bool(t.stop_recursion_if_no_split),
+        # minimum-mass constraint
+        min_share_prob=None if t.min_share_prob is None else float(t.min_share_prob),
+        enforce_min_share_hard=bool(t.enforce_min_share_hard),
+        # MILP
+        MILP=bool(t.MILP),
+        milp_only_if_needed=bool(t.milp_only_if_needed),
+        milp_candidate_topk=None if t.milp_candidate_topk is None else int(t.milp_candidate_topk),
+        milp_time_limit=None if t.milp_time_limit is None else float(t.milp_time_limit),
+        milp_gap=float(t.milp_gap),
+        milp_solver_name=str(t.milp_solver_name),
+        milp_verbose=bool(t.milp_verbose),
+        milp_use_weighted_centers=bool(t.milp_use_weighted_centers),
+        milp_refine_rounds=int(t.milp_refine_rounds),
+        # logging
+        print_each_clustering=bool(t.print_each_clustering),
+        print_stats=bool(t.print_stats),
+    )
+
+
+@hydra.main(config_path="conf", config_name="config", version_base="1.3")
+def main(cfg: DictConfig) -> None:
+    print(OmegaConf.to_yaml(cfg))
+    set_global_seed(int(cfg.seed))
+
+    out_dir = Path(HydraConfig.get().runtime.output_dir)
+    data_root = Path(get_original_cwd()) / str(cfg.data.root)
+    category = str(cfg.data.category)
+
+    # ---- data: leave-last-out splits over item ids 3..N+2 (0/1/2 = pad/eos/unk) ----
+    dd, item2token, _ = build_amazon2014_seq_splits(
+        category, root=str(data_root), download_if_missing=bool(cfg.data.download_if_missing)
+    )
+    dd = dd.map(lambda ex: {"history": ex["history"][-int(cfg.data.max_history):]})
+    print_split_stats(dd)
+    item2token = normalize_item2token(item2token, start=int(cfg.tokenization.start_token))
+
+    asin_set = set(item2token.keys())
+    meta = load_amazon2014_meta(
+        category,
+        root=str(data_root),
+        only_asins=asin_set,
+        download_if_missing=bool(cfg.data.download_if_missing),
+        keep_columns=list(cfg.data.keep_columns),
+    )
+    dd = tokenize_splits(dd, item2token)
+
+    # ---- code-token vocabulary: <c{level}_{k}> for level < m, k < base ----
+    BASE, M = int(cfg.tokenization.base), int(cfg.tokenization.m)
+    tokenizer = build_contiguous_wordlevel_tokenizer(
+        [f"<c{lvl}_{i}>" for lvl in range(M) for i in range(BASE)], padding_side="left"
+    )
+    pad_id, eos_id = tokenizer.pad_token_id, tokenizer.eos_token_id
+
+    # ---- AST semantic IDs ----
+    asin2text = build_asin2text(meta, asin_set=asin_set, cols=list(cfg.data.cols_to_use))
+    id2text = build_id2text_from_item2token(item2token, asin2text)
+    sids_path = cfg.tokenization.sids_path
+    if sids_path:  # reuse semantic IDs built by an earlier run (e.g. stop_after=sids)
+        with open(Path(get_original_cwd()) / str(sids_path), "rb") as f:
+            item2tokseq_ids = pickle.load(f)
+        print(f"[AST] loaded semantic IDs from {sids_path}")
+    else:
+        item_embs = load_or_encode_items(cfg, id2text, data_root)
+        if cfg.stop_after == "embed":
+            return
+        item_probs, _, _ = compute_item_probs_from_dd_train(dd)  # interaction frequency in train
+        if len(item_probs) < len(id2text):  # items never seen in train get zero mass
+            item_probs = np.pad(item_probs, (0, len(id2text) - len(item_probs)))
+        t0 = time.time()
+        item2tokseq_ids = build_semantic_ids(cfg, id2text, tokenizer, item_probs, item_embs)
+        sid_seconds = time.time() - t0
+        with open(out_dir / "item2tokseq_ids.pkl", "wb") as f:
+            pickle.dump(item2tokseq_ids, f, protocol=pickle.HIGHEST_PROTOCOL)
+        codes = list(item2tokseq_ids.values())
+        stats = {
+            "n_items": len(codes),
+            "n_unique_sids": len({tuple(c) for c in codes}),
+            **{f"prefixes_len{l}": len({tuple(c[:l]) for c in codes}) for l in range(1, M)},
+            "build_seconds": round(sid_seconds, 1),
+        }
+        print(f"[AST] {stats}")
+        with open(out_dir / "sids_stats.json", "w") as f:
+            json.dump(stats, f, indent=2)
+        if cfg.stop_after == "sids":
+            return
+
+    # ---- seq2seq examples ----
+    tokenize_fn = make_seq2seq_tokenize_fn(item2tokseq_ids=item2tokseq_ids, M=M)
+    tokenized = {
+        split: dd[split].map(tokenize_fn, remove_columns=list(cfg.data.remove_cols))
+        for split in ["train", "validation", "test"]
+    }
+
+    # ---- model ----
+    mc = cfg.model
+    model = build_t5_seq2seq(
+        vocab_size=len(tokenizer),
+        pad_token_id=pad_id,
+        eos_token_id=eos_id,
+        encoder_layers=int(mc.encoder_layers),
+        decoder_layers=int(mc.decoder_layers),
+        d_model=int(mc.d_model),
+        d_ff=int(mc.d_ff),
+        num_heads=int(mc.num_heads),
+        dropout_rate=float(mc.dropout_rate),
+        initializer_factor=float(mc.initializer_factor),
+        layer_norm_epsilon=float(mc.layer_norm_epsilon),
+        feed_forward_proj=str(mc.feed_forward_proj),
+    )
+    model.resize_token_embeddings(len(tokenizer))
+    print_model_parameters(model)
+
+    gen = model.generation_config
+    gen.num_beams = int(cfg.generation.num_beams)
+    gen.num_return_sequences = int(cfg.generation.num_return_sequences)
+    gen.do_sample = bool(cfg.generation.do_sample)
+    gen.max_new_tokens = M
+    gen.min_new_tokens = M
+
+    prefix_allowed_tokens = make_prefix_allowed_tokens_fn(
+        build_item_code_trie(item2tokseq_ids),
+        pad_id=pad_id,
+        eos_id=eos_id,
+        decoder_start_id=model.config.decoder_start_token_id,
+        M=M,
+    )
+
+    # ---- training ----
+    train_ds = tokenized["train"].shuffle(seed=int(cfg.seed))
+    if cfg.debug.train_select is not None:
+        train_ds = train_ds.select(list(cfg.debug.train_select))
+    if cfg.debug.eval_limit is not None:  # quick checks only: evaluate on the first n users
+        for split in ("validation", "test"):
+            tokenized[split] = tokenized[split].select(range(min(int(cfg.debug.eval_limit), len(tokenized[split]))))
+
+    callbacks = [
+        EvalSaveEveryNEpochsCallback(
+            eval_n=cfg.training.schedule.eval_every_n_epochs,
+            save_n=cfg.training.schedule.save_every_n_epochs,
+            eval_on_last=cfg.training.schedule.always_eval_on_last,
+            save_on_last=cfg.training.schedule.always_save_on_last,
+        )
+    ]
+    if cfg.training.early_stopping.enabled:
+        callbacks.append(
+            EarlyStoppingCallback(
+                early_stopping_patience=int(cfg.training.early_stopping.patience),
+                early_stopping_threshold=float(cfg.training.early_stopping.threshold),
+            )
+        )
+
+    trainer = TrieConstrainedSeq2SeqTrainer(
+        model=model,
+        args=Seq2SeqTrainingArguments(**OmegaConf.to_container(cfg.training.hf, resolve=True)),
+        processing_class=tokenizer,
+        data_collator=DataCollatorForSeq2Seq(
+            tokenizer=tokenizer, model=model, padding=True, label_pad_token_id=DEFAULT_IGN_ID, return_tensors="pt"
+        ),
+        train_dataset=train_ds,
+        eval_dataset=tokenized["validation"],
+        compute_metrics=build_code_metrics(item2tokseq_ids=item2tokseq_ids, pad_id=pad_id, M=M, k_values=(5, 10)),
+        callbacks=callbacks,
+        prefix_allowed_tokens_fn=prefix_allowed_tokens,
+        gen_M=M,
+    )
+    trainer.train()
+
+    # best checkpoint (by validation NDCG@10) is loaded at the end of training
+    test_metrics = trainer.evaluate(eval_dataset=tokenized["test"], metric_key_prefix="test")
+    print("Test:", test_metrics)
+    with open(out_dir / "test_metrics.json", "w") as f:
+        json.dump(
+            {
+                "category": category,
+                "variant": str(cfg.tokenization.variant),
+                "m": M,
+                "base": BASE,
+                "min_share_prob": cfg.tokenization.min_share_prob,
+                **{k: float(v) for k, v in test_metrics.items()},
+            },
+            f,
+            indent=2,
+        )
+
+    try:
+        import wandb
+
+        if wandb.run is not None:
+            wandb.finish()
+    except Exception:
+        pass
+
+
+if __name__ == "__main__":
+    main()

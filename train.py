@@ -22,7 +22,7 @@ import numpy as np
 from hydra.core.hydra_config import HydraConfig
 from hydra.utils import get_original_cwd
 from omegaconf import DictConfig, OmegaConf
-from transformers import DataCollatorForSeq2Seq, EarlyStoppingCallback, Seq2SeqTrainingArguments
+from transformers import DataCollatorForSeq2Seq, EarlyStoppingCallback, Seq2SeqTrainingArguments, TrainerCallback
 
 from data import build_amazon2014_seq_splits, build_asin2text, load_amazon2014_meta, print_split_stats
 from evaluation import build_code_metrics
@@ -45,6 +45,18 @@ from utils import (
     set_global_seed,
     tokenize_splits,
 )
+
+
+class _StopAtStep(TrainerCallback):
+    """Stop after `step` optimizer steps without changing the learning-rate schedule."""
+
+    def __init__(self, step: int):
+        self.step = step
+
+    def on_step_end(self, args, state, control, **kwargs):
+        if state.global_step >= self.step:
+            control.should_training_stop = True
+        return control
 
 
 def load_or_encode_items(cfg: DictConfig, id2text, data_root: Path) -> np.ndarray:
@@ -257,7 +269,16 @@ def main(cfg: DictConfig) -> None:
         prefix_allowed_tokens_fn=prefix_allowed_tokens,
         gen_M=M,
     )
+    if cfg.debug.stop_at_step is not None:
+        trainer.add_callback(_StopAtStep(int(cfg.debug.stop_at_step)))
     trainer.train()
+
+    if cfg.debug.stop_at_step is not None:  # quick check: report the training-loss curve and stop
+        losses = {f"loss@{h['step']}": h["loss"] for h in trainer.state.log_history if "loss" in h}
+        print("Train losses:", losses)
+        with open(out_dir / "train_log.json", "w") as f:
+            json.dump(losses, f, indent=2)
+        return
 
     # best checkpoint (by validation NDCG@10) is loaded at the end of training
     test_metrics = trainer.evaluate(eval_dataset=tokenized["test"], metric_key_prefix="test")

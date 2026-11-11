@@ -18,6 +18,7 @@ generation:
 debug:
   train_select: null               # e.g. [0, 1, 2] to train on a few examples
   eval_limit: null                 # e.g. 500 to evaluate on the first 500 users (quick checks only)
+  stop_at_step: null               # e.g. 2000: stop training there (same LR schedule), write train_log.json, skip test
 
 hydra:
   run:

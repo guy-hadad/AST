@@ -1,7 +1,7 @@
 """AST end-to-end: Amazon 2014 data -> AST semantic IDs -> T5 generative recommender -> Recall/NDCG.
 
-    python train.py experiment=beauty_ast_v2
-    python train.py data.category=Toys_and_Games tokenization=ast_v1 tokenization.m=4 tokenization.min_share_prob=0.04
+    python train.py experiment=beauty
+    python train.py data.category=Toys_and_Games tokenization.m=4 tokenization.min_share_prob=0.01
 
 Optional stages (the full run needs none of them):
     stop_after=embed                 only encode + cache item embeddings
@@ -283,6 +283,15 @@ def main(cfg: DictConfig) -> None:
     # best checkpoint (by validation NDCG@10) is loaded at the end of training
     test_metrics = trainer.evaluate(eval_dataset=tokenized["test"], metric_key_prefix="test")
     print("Test:", test_metrics)
+    # validation metrics of the selected checkpoint (the Trainer's best step; else the first best evaluation)
+    evals = [h for h in trainer.state.log_history if "eval_ndcg@10" in h]
+    best_step = getattr(trainer.state, "best_global_step", None)
+    best_eval = next((h for h in evals if best_step and h.get("step") == best_step), None)
+    if best_eval is None:
+        best_eval = max(evals, key=lambda h: float(h["eval_ndcg@10"])) if evals else {}
+    val_metrics = {k.replace("eval_", "val_"): float(v) for k, v in best_eval.items() if k.startswith("eval_") and "@" in k}
+    if best_eval:
+        val_metrics["best_epoch"] = float(best_eval["epoch"])
     with open(out_dir / "test_metrics.json", "w") as f:
         json.dump(
             {
@@ -291,7 +300,9 @@ def main(cfg: DictConfig) -> None:
                 "m": M,
                 "base": BASE,
                 "min_share_prob": cfg.tokenization.min_share_prob,
+                "use_item_mass": bool(cfg.tokenization.use_item_mass),
                 **{k: float(v) for k, v in test_metrics.items()},
+                **val_metrics,
             },
             f,
             indent=2,

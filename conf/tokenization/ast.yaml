@@ -1,5 +1,5 @@
-# AST-V1: fixed-center feasibility correction (paper Sec. 4.4.2)
-variant: AST-V1
+# AST: mass-aware constrained refinement (paper Sec. 4.4.3, reported as AST-V2 in Table 1)
+variant: AST
 base: 4096                         # B: max branching factor / tokens per level
 m: 4                               # semantic ID length (m-1 tree levels + 1 suffix token)
 encoder_name: Qwen/Qwen3-Embedding-0.6B
@@ -20,16 +20,16 @@ capacity_aware_min_k: true         # K_min guarantees every leaf bucket fits in 
 stop_recursion_if_no_split: true
 
 # ---- minimum-mass constraint ----
-min_share_prob: 0.04               # rho: every child keeps >= rho of its parent's mass
+min_share_prob: 0.02               # rho: every child keeps >= rho of its parent's mass
 enforce_min_share_hard: true       # never accept a split that violates rho
 use_item_mass: true                # p_i = train interaction frequency (false = uniform mass)
 
-# ---- MILP reassignment w.r.t. fixed KMeans centers ----
+# ---- mass-aware MILP refinement ----
 MILP: true
 milp_only_if_needed: false         # solve the MILP for every candidate split
-milp_refine_rounds: 1              # one exact assignment, centers stay fixed
-milp_use_weighted_centers: true    # KMeans init weighted by item mass (as in the paper runs)
-weighted_silhouette: false         # score splits with the standard silhouette
+milp_refine_rounds: 3              # alternate {exact MILP assignment, weighted center update}
+milp_use_weighted_centers: true    # mass-weighted KMeans init and center updates
+weighted_silhouette: true          # score splits with the mass-weighted silhouette
 milp_candidate_topk: 16            # each item may join one of its 16 nearest centers
 milp_time_limit: 100               # seconds per (node, K) solve
 milp_gap: 0.001

@@ -1,13 +1,13 @@
 # @package _global_
-# Paper Table 1: Beauty / AST-V2 (source run: hw4e1ukl)
+# Paper Table 1: Sports_and_Outdoors / AST
 defaults:
-  - override /tokenization: ast_v2
+  - override /tokenization: ast
 
 data:
-  category: Beauty
+  category: Sports_and_Outdoors
 
 tokenization:
-  m: 4
+  m: 5
   min_share_prob: 0.02
   use_item_mass: true
   milp_time_limit: 100

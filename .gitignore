@@ -6,6 +6,7 @@ __pycache__/
 raw_data/
 outputs/
 multirun/
+runs/
 wandb/
 checkpoint-*/
 *.pkl

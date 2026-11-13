@@ -1,10 +1,10 @@
 defaults:
   - data: amazon2014
-  - tokenization: ast_v2
+  - tokenization: ast
   - model: t5
   - training: default
   - _self_
-  - experiment: null               # e.g. experiment=beauty_ast_v2 (paper Table 1 settings)
+  - experiment: null               # e.g. experiment=beauty (paper Table 1 settings)
 
 seed: 42
 stop_after: null                   # null (full run) | embed | sids

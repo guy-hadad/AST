@@ -8,16 +8,11 @@ the path of the item in a top-down KMeans tree whose branching factor ``K_v`` is
 per node by maximizing the silhouette coefficient (Sec. 4.2). The last token is a
 deterministic, collision-free suffix inside each leaf bucket.
 
-Constrained variants (Sec. 4.4) require every child to carry at least a fraction ``rho``
-(``min_share_prob``) of its parent's mass:
-
-* **AST-V1** (fixed-center feasibility correction, Sec. 4.4.2): standard KMeans centers,
-  one exact MILP reassignment w.r.t. those fixed centers (Eq. 1-4), unweighted silhouette.
-  -> ``milp_refine_rounds=1, milp_use_weighted_centers=False, weighted_silhouette=False``
-* **AST-V2** (mass-aware constrained refinement, Sec. 4.4.3): mass-weighted KMeans
-  initialization, alternating {exact MILP assignment, mass-weighted center update}
-  rounds, and the mass-weighted silhouette.
-  -> ``milp_refine_rounds=3, milp_use_weighted_centers=True, weighted_silhouette=True``
+The constrained tokenizer (Sec. 4.4.3, mass-aware constrained refinement) requires every
+child to carry at least a fraction ``rho`` (``min_share_prob``) of its parent's mass. It uses a
+mass-weighted KMeans initialization, alternates {exact MILP assignment (Eq. 1-4), mass-weighted
+center update} rounds, and scores splits with the mass-weighted silhouette:
+``milp_refine_rounds=3, milp_use_weighted_centers=True, weighted_silhouette=True``.
 """
 from __future__ import annotations
 
@@ -212,7 +207,7 @@ def build_item2tokseq_ids_silhouette_tree(
     patience: int = 5,
     silhouette_sample_size: int | None = 2000,
     k_search_step: int = 1,
-    weighted_silhouette: bool = True,          # mass-weighted silhouette (AST-V2); needs item_probs
+    weighted_silhouette: bool = True,          # mass-weighted silhouette; needs item_probs
 
     # tree behaviour
     capacity_aware_min_k: bool = True,
@@ -230,8 +225,8 @@ def build_item2tokseq_ids_silhouette_tree(
     milp_gap: float = 1e-3,
     milp_solver_name: str = "CBC",
     milp_verbose: bool = False,
-    milp_use_weighted_centers: bool = True,    # mass-weighted KMeans init + center updates (AST-V2)
-    milp_refine_rounds: int = 3,               # 1 = fixed centers (AST-V1); >1 = alternating refinement (AST-V2)
+    milp_use_weighted_centers: bool = True,    # mass-weighted KMeans init + center updates
+    milp_refine_rounds: int = 3,               # 1 = one assignment w.r.t. fixed centers; >1 = alternating refinement
 
     # logging
     print_each_clustering: bool = True,
@@ -422,7 +417,7 @@ def build_item2tokseq_ids_silhouette_tree(
         return p_local / s
 
     def _centers_from_labels(X, p_local, labels, K) -> np.ndarray | None:
-        """Center update: mass-weighted mean (AST-V2) or plain mean. None if a cluster is empty."""
+        """Center update: mass-weighted mean or plain mean. None if a cluster is empty."""
         X = np.asarray(X, dtype=np.float64)
         p_local = np.asarray(p_local, dtype=np.float64).reshape(-1)
         labels = np.asarray(labels, dtype=np.int32).reshape(-1)
@@ -445,7 +440,7 @@ def build_item2tokseq_ids_silhouette_tree(
         Constrained split for a fixed K:
           1) centers from (mass-weighted) KMeans
           2) exact MILP assignment w.r.t. the current centers
-          3) (AST-V2) recompute centers from the assignment and repeat, up to
+          3) recompute centers from the assignment and repeat, up to
              ``milp_refine_rounds`` assignments or until assignments/centers stop changing.
         Returns None if MILP is disabled, infeasible, or the solver fails.
         """

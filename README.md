@@ -4,9 +4,9 @@ Official implementation of **AST (Adaptive Silhouette Tree)**, from the RecSys '
 
 > Guy Hadad, Haggai Roitman, Bracha Shapira. *Not All Branches Are Equal: Adaptive Semantic ID Construction for Generative Recommendation.* In Proceedings of the 20th ACM Conference on Recommender Systems (RecSys '26), pp. 390–399. [https://doi.org/10.1145/3773078.3831756](https://doi.org/10.1145/3773078.3831756)
 
-AST is a top-down divisive clustering method that builds semantic IDs as **paths in a tree**. The branching factor of every node is chosen by maximizing the silhouette coefficient, so dense regions of the item space get finer partitions and homogeneous regions stay compact. Two constrained variants, **AST-V1** and **AST-V2**, also require every branch to carry a minimum share of interaction mass, so that rare prefixes still receive enough supervision.
+AST is a top-down divisive clustering method that builds semantic IDs as **paths in a tree**. The branching factor of every node is chosen by maximizing the silhouette coefficient, so dense regions of the item space get finer partitions and homogeneous regions stay compact. AST also requires every branch to carry a minimum share of interaction mass, so that rare prefixes still receive enough supervision. It enforces this with an exact MILP assignment alternated with mass-weighted center updates (the mass-aware constrained refinement of §4.4.3, reported as AST-V2 in the paper).
 
-This repository contains exactly what is needed to reproduce the AST rows of the paper's main results (Table 1): the AST tokenizer, the shared T5 generative recommender, and the evaluation protocol.
+This repository contains what is needed to reproduce the AST results of the paper's main table (Table 1): the AST tokenizer, the shared T5 generative recommender, and the evaluation protocol.
 
 ---
 
@@ -18,10 +18,11 @@ This repository contains exactly what is needed to reproduce the AST rows of the
 4. [Data](#data)
 5. [Quick start](#quick-start)
 6. [Reproducing Table 1](#reproducing-table-1)
-7. [Pipeline](#pipeline)
-8. [Evaluation protocol](#evaluation-protocol)
-9. [Configuration reference](#configuration-reference)
-10. [Citation](#citation)
+7. [Hyperparameter search](#hyperparameter-search)
+8. [Pipeline](#pipeline)
+9. [Evaluation protocol](#evaluation-protocol)
+10. [Configuration reference](#configuration-reference)
+11. [Citation](#citation)
 
 ---
 
@@ -33,10 +34,9 @@ AST builds the first `L = m - 1` tokens by recursively clustering unit-norm item
 
 | Component | What it does | Paper |
 |---|---|---|
-| Adaptive branching | At every node, try `K = K_min, K_min+1, ...` and keep the KMeans split with the highest silhouette (Euclidean, early stop after 5 non-improving candidates). `K_min` is capacity-aware, so every final bucket fits into `B` suffix tokens. | §4.2 |
-| Minimum-mass constraint `ρ` | Every child must hold at least a fraction `ρ` of its parent's mass, which implies `K ≤ ⌊1/ρ⌋`. Splits that violate it are repaired with an exact MILP assignment (Eq. 1–4), or rejected. | §4.4.1 |
-| **AST-V1** | *Fixed-center feasibility correction.* KMeans centers stay fixed and one exact MILP reassignment restores feasibility. Splits are scored with the standard silhouette. | §4.4.2 |
-| **AST-V2** | *Mass-aware constrained refinement.* Alternates the exact MILP assignment with mass-weighted center updates (a constrained Lloyd iteration), and scores splits with the mass-weighted silhouette. | §4.4.3 |
+| Adaptive branching | At every node, try `K = K_min, K_min+1, ...` and keep the split with the highest silhouette (Euclidean, early stop after 5 non-improving candidates). `K_min` is capacity-aware, so every final bucket fits into `B` suffix tokens. | §4.2 |
+| Minimum-mass constraint `ρ` | Every child must hold at least a fraction `ρ` of its parent's mass, which implies `K ≤ ⌊1/ρ⌋`. Each candidate split is made feasible with an exact MILP assignment (Eq. 1–4); splits that cannot satisfy it are rejected. | §4.4.1 |
+| Mass-aware constrained refinement | Starts from mass-weighted KMeans centers, alternates the exact MILP assignment with mass-weighted center updates (a constrained Lloyd iteration), and scores splits with the mass-weighted silhouette. | §4.4.3 |
 | Constrained decoding | Beam search is restricted to a trie of the real item codes, so every generated ID is an item in the catalog. | §4.3 |
 
 The MILP is solved with **CBC** through `python-mip`, so no license is needed. **Gurobi** is optional (`tokenization.milp_solver_name=GRB`).
@@ -48,18 +48,19 @@ The MILP is solved with **CBC** through `python-mip`, so no license is needed. *
 ```
 AST/
 ├── train.py             # entry point: data -> AST semantic IDs -> T5 recommender -> test metrics
-├── silhouette_tree.py   # AST tokenizer (adaptive branching, MILP mass constraint, AST-V1 / AST-V2)
+├── silhouette_tree.py   # AST tokenizer (adaptive branching, minimum-mass MILP, constrained refinement)
 ├── data.py              # Amazon Reviews 2014 (5-core): download, leave-last-out splits, item text
 ├── model.py             # T5 encoder-decoder, code trie, trie-constrained Seq2SeqTrainer
 ├── evaluation.py        # Recall@k / NDCG@k over decoded items
 ├── utils.py             # seeding, item ids and mass, <cℓ_k> vocabulary, seq2seq examples
+├── summarize_runs.py    # rank the runs of a hyperparameter search by validation NDCG@10
 ├── conf/                # Hydra configs
 │   ├── config.yaml
 │   ├── data/amazon2014.yaml
 │   ├── model/t5.yaml
 │   ├── training/default.yaml
-│   ├── tokenization/ast_v1.yaml, ast_v2.yaml
-│   └── experiment/      # one file per AST cell of Table 1 (e.g. beauty_ast_v2.yaml)
+│   ├── tokenization/ast.yaml
+│   └── experiment/      # Table 1 settings per dataset: beauty, toys, sports, health, home
 ├── requirements.txt
 ├── CITATION.cff
 └── LICENSE
@@ -96,62 +97,88 @@ We use five domains of **Amazon Reviews 2014** (McAuley et al.), in the standard
 ## Quick start
 
 ```bash
-# AST-V2 on Beauty with the Table 1 hyperparameters
-python train.py experiment=beauty_ast_v2
+# AST on Beauty with the Table 1 hyperparameters
+python train.py experiment=beauty
 
 # print the fully resolved config without running
-python train.py experiment=beauty_ast_v2 --cfg job
+python train.py experiment=beauty --cfg job
 ```
 
-Each run writes to `outputs/<category>/<variant>/<timestamp>/`:
+Each run writes to `outputs/<category>/AST/<timestamp>/`:
 - `item2tokseq_ids.pkl`: the semantic ID (a list of `m` token ids) of every item;
 - `sids_stats.json`: tree statistics and build time;
-- `test_metrics.json`: test Recall@{5,10} and NDCG@{5,10} of the best checkpoint (selected by validation NDCG@10).
+- `test_metrics.json`: test Recall@{5,10} and NDCG@{5,10} of the best checkpoint (selected by validation NDCG@10), plus that checkpoint's validation metrics (`val_*`).
 
 ---
 
 ## Reproducing Table 1
 
-All runs share the same recommender and training budget, so a Table 1 cell is fully defined by the dataset, the variant, the code length `m` and the mass constraint `ρ`. `base = 4096` for every cell. The per-cell values are in `conf/experiment/`:
+All runs share the same recommender and training budget, so a Table 1 cell is fully defined by the dataset, the code length `m`, the mass constraint `ρ`, and the item mass (training interaction frequency, or uniform). `base = 4096` for every dataset. The per-dataset values are in `conf/experiment/`:
 
-| Dataset | Variant | `m` | `ρ` | Config | R@5 | R@10 | N@5 | N@10 |
-|---|---|---:|---:|---|---:|---:|---:|---:|
-| Beauty | AST-V1 | 4 | 0.04 | `beauty_ast_v1` | 5.12 | 7.31 | 3.50 | 4.20 |
-| Beauty | AST-V2 | 4 | 0.02 | `beauty_ast_v2` | 5.12 | 7.51 | 3.51 | 4.28 |
-| Toys | AST-V1 | 4 | 0.04 | `toys_ast_v1` | 5.16 | 7.75 | 3.41 | 4.24 |
-| Toys | AST-V2 | 4 | 0.01 | `toys_ast_v2` | 5.27 | 7.94 | 3.45 | 4.31 |
-| Sports | AST-V1 | 4 | 0.001 | `sports_ast_v1` | 3.01 | 4.62 | 2.02 | 2.54 |
-| Sports | AST-V2 | 5 | 0.02 | `sports_ast_v2` | 3.09 | 4.62 | 2.03 | 2.51 |
-| Health | AST-V1 | 4 | 0.04 | `health_ast_v1` | 4.32 | 6.40 | 2.89 | 3.58 |
-| Health | AST-V2 | 5 | 0.05 | `health_ast_v2` | 4.48 | 6.64 | 2.98 | 3.68 |
-| Home | AST-V1 | 4 | 0.005 | `home_ast_v1` | 1.68 | 2.64 | 1.13 | 1.43 |
-| Home | AST-V2 | 5 | 0.01 | `home_ast_v2` | 2.06 | 3.02 | 1.36 | 1.67 |
+| Dataset | `m` | `ρ` | Item mass | Config | R@5 | R@10 | N@5 | N@10 |
+|---|---:|---:|---|---|---:|---:|---:|---:|
+| Beauty | 4 | 0.02 | uniform | `beauty` | 5.12 | 7.51 | 3.51 | 4.28 |
+| Toys | ? | ? | ? | `toys` | 5.27 | 7.94 | 3.45 | 4.31 |
+| Sports | 5 | 0.02 | interactions | `sports` | 3.09 | 4.62 | 2.03 | 2.51 |
+| Health | 5 | 0.05 | interactions | `health` | 4.48 | 6.64 | 2.98 | 3.68 |
+| Home | 5 | 0.01 | uniform | `home` | 2.06 | 3.02 | 1.36 | 1.67 |
 
-Metrics are percentages on the test split, as reported in the paper.
+Metrics are percentages on the test split, as reported in the paper. The Toys configuration for this code release will be released soon.
+
+**Results of this code.** One run per dataset with the settings above (seed 42, one RTX 4090 GPU):
+
+| Dataset | R@5 | R@10 | N@5 | N@10 |
+|---|---:|---:|---:|---:|
+| Beauty | 5.13 | 7.53 | 3.43 | 4.20 |
+| Toys | ? | ? | ? | ? |
+| Sports | 3.13 | 4.58 | 2.10 | 2.57 |
+| Health | 4.47 | 6.62 | 2.95 | 3.65 |
+| Home | 1.99 | 2.96 | 1.34 | 1.65 |
+
+On these four datasets, every metric is within 0.08 points of the paper. Toys results will be released soon.
+
+> **Note.** Results can vary from run to run. They depend on the random seed (KMeans initialization, model initialization and data order), and parts of the pipeline are not deterministic: the MILP solves are time-limited, so the semantic IDs can change with machine speed, and GPU kernels differ across GPU models and library versions. Expect small differences from the numbers above.
 
 ```bash
-# one cell
-python train.py experiment=toys_ast_v2
+# one dataset
+python train.py experiment=sports
 
-# all ten AST cells (sequentially; see below for cost)
+# all five datasets (sequentially; see below for cost). Toys still uses provisional hyperparameters.
 for ds in beauty toys sports health home; do
-  for v in ast_v1 ast_v2; do
-    python train.py experiment=${ds}_${v}
-  done
+  python train.py experiment=$ds
 done
 ```
 
-**Cost.** Building the semantic IDs is CPU work dominated by the MILP solves (minutes on Beauty, a few hours on Home). Training on one RTX 6000 Ada takes 2–3 h on Beauty and Toys and up to about 11 h on Home. Results can differ slightly between GPUs and library versions, because GPU kernels and the time-limited MILP solves are not bit-deterministic.
+**Cost.** Building the semantic IDs is CPU work dominated by the MILP solves: on 8 cores, 0.5–1.5 h for Beauty and Toys and 1.5–4 h for Sports, Health and Home. Training on one RTX 4090 takes 2–3 h for Beauty and Toys, about 6 h for Sports and Health, and 10–15 h for Home. With the same semantic IDs, GPU model and library versions, training reproduces the same numbers.
 
 **Running the stages separately** (for example, semantic IDs on a CPU node and training on a GPU node):
 
 ```bash
-python train.py experiment=home_ast_v2 stop_after=embed     # GPU: encode + cache item embeddings
-python train.py experiment=home_ast_v2 stop_after=sids hydra.run.dir=runs/home_v2   # CPU: build semantic IDs
-python train.py experiment=home_ast_v2 tokenization.sids_path=runs/home_v2/item2tokseq_ids.pkl   # GPU: train + test
+python train.py experiment=home stop_after=embed     # GPU: encode + cache item embeddings
+python train.py experiment=home stop_after=sids hydra.run.dir=runs/home   # CPU: build semantic IDs
+python train.py experiment=home tokenization.sids_path=runs/home/item2tokseq_ids.pkl   # GPU: train + test
 ```
 
-Item embeddings are cached under `raw_data/embeddings/` (keyed by encoder and item texts), so all variants of one dataset encode the catalog only once.
+Item embeddings are cached under `raw_data/embeddings/` (keyed by encoder and item texts), so all configurations of one dataset encode the catalog only once.
+
+---
+
+## Hyperparameter search
+
+Per dataset, AST has three hyperparameters: the code length `m`, the mass constraint `ρ` (`min_share_prob`), and the item mass (`use_item_mass=true` for the training interaction frequency, `false` for uniform). Hydra's multirun runs a grid, and `summarize_runs.py` ranks the runs:
+
+```bash
+python train.py -m experiment=toys \
+  tokenization.m=4,5 \
+  tokenization.min_share_prob=0.001,0.005,0.01,0.02,0.03,0.04,0.05,0.075,0.1 \
+  tokenization.use_item_mass=true,false
+
+python summarize_runs.py multirun/ --csv toys_search.csv
+```
+
+Every run records the validation metrics of its selected checkpoint (`val_*`) next to the test metrics, and `summarize_runs.py` sorts the runs by validation NDCG@10. Choose the configuration by validation and report its test metrics.
+
+The grid above has 36 configurations. To run it in parallel, build every configuration's semantic IDs on CPU first (`stop_after=sids`), then train each one on a GPU with `tokenization.sids_path=...` and the same `tokenization.*` overrides, which are recorded in `test_metrics.json`. Configurations whose semantic IDs are identical (for example, when the mass constraint is never active) give identical results, so train those only once.
 
 ---
 
@@ -179,21 +206,21 @@ Item embeddings are cached under `raw_data/embeddings/` (keyed by encoder and it
 
 ## Configuration reference
 
-### Tokenization (`conf/tokenization/ast_v1.yaml`, `ast_v2.yaml`)
+### Tokenization (`conf/tokenization/ast.yaml`)
 
 | Key | Symbol | Value | Meaning |
 |---|---|---|---|
 | `base` | `B` | 4096 | Maximum branching factor / tokens per level |
-| `m` | `m` | per cell | Semantic ID length (`m-1` tree levels + 1 suffix token) |
+| `m` | `m` | per dataset | Semantic ID length (`m-1` tree levels + 1 suffix token) |
 | `encoder_name` | | `Qwen/Qwen3-Embedding-0.6B` | Item-text encoder |
 | `max_iter_kmeans`, `n_init_kmeans` | | 50, 10 | KMeans budget at every candidate split |
 | `patience` | | 5 | Stop the `K` search after this many non-improving candidates |
 | `silhouette_sample_size` | | 2000 | Silhouette is estimated on a subsample for larger nodes |
-| `min_share_prob` | `ρ` | per cell | Minimum fraction of the parent's mass for every child |
-| `use_item_mass` | `p_i` | per cell | Item mass = training interaction frequency (`false` = uniform) |
-| `milp_refine_rounds` | | V1: 1, V2: 3 | Exact assignments per split; above 1, alternates with center updates |
-| `milp_use_weighted_centers` | | true | Mass-weighted KMeans initialization (and center updates in V2) |
-| `weighted_silhouette` | | V1: false, V2: true | Score splits with the mass-weighted silhouette |
+| `min_share_prob` | `ρ` | per dataset | Minimum fraction of the parent's mass for every child |
+| `use_item_mass` | `p_i` | per dataset | Item mass = training interaction frequency (`false` = uniform) |
+| `milp_refine_rounds` | | 3 | Exact assignments per split, alternating with mass-weighted center updates |
+| `milp_use_weighted_centers` | | true | Mass-weighted KMeans initialization and center updates |
+| `weighted_silhouette` | | true | Score splits with the mass-weighted silhouette |
 | `milp_candidate_topk` | | 16 | Each item may be assigned to one of its 16 nearest centers |
 | `milp_time_limit`, `milp_gap` | | 100 s, 1e-3 | Per-(node, K) solver budget |
 | `milp_solver_name` | | `CBC` | `CBC` (open source) or `GRB` (Gurobi) |
